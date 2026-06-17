@@ -1,0 +1,14 @@
+# Secrets & runtime
+.env
+*.db
+*.sqlite
+bot.log
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# Playwright / tooling artifacts
+.playwright-mcp/

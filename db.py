@@ -9,13 +9,16 @@ Schema:
     trip_checks — history of GPS checks per tracker per trip
 """
 
+import os
 import aiosqlite
 import logging
 from datetime import datetime
 
 log = logging.getLogger(__name__)
 
-DB_PATH = "puesc_bot.db"
+# On Railway the container filesystem is ephemeral — set DB_PATH to a mounted
+# volume (e.g. /data/puesc_bot.db) so data survives redeploys/restarts.
+DB_PATH = os.getenv("DB_PATH", "puesc_bot.db")
 
 
 # ---------------------------------------------------------------------------

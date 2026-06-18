@@ -179,6 +179,7 @@ def _interpret(page_text: str, base: dict) -> CheckResult:
         now_ref = _parse_datetime_pl(m_now.group(1))
     if now_ref is None:
         now_ref = _warsaw_now()
+    log.info("DIAG now_ref=%s src=%s", now_ref, "page" if m_now else "fallback")
 
     # Status zgłoszenia (Kompletne / Niekompletne / Zamknięte ...)
     decl_status = None

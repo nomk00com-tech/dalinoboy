@@ -203,6 +203,11 @@ async def run_scheduled_checks(bot: Bot):
             # even if PUESC flagged it stale (GEO lag / timezone skew).
             status = effective_status(r, history)
             statuses.append(status)
+            prev_lp = next((_parse_lp(h.get("last_position_time")) for h in history
+                            if _parse_lp(h.get("last_position_time")) is not None), None)
+            log.info("DIAG trip %s %s: puesc=%s eff=%s czas=%s prev=%s age=%s",
+                     trip["id"], r.tracker_number, r.status, status,
+                     r.last_position, prev_lp, r.signal_age_min)
             await db.save_check(
                 trip["id"], r.tracker_id, status, r.last_position, r.message,
                 latitude=r.latitude, longitude=r.longitude, alarm=0,

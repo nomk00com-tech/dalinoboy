@@ -38,6 +38,18 @@ ADMIN_IDS: set[int] = {int(x.strip()) for x in os.getenv("ADMIN_IDS", "").split(
 _live_maps: dict[tuple[int, int], int] = {}
 
 
+async def _cleanup_maps(chat_id: int, bot: Bot):
+    """Delete every live map pin belonging to this chat."""
+    to_remove = [k for k in _live_maps if k[0] == chat_id]
+    for key in to_remove:
+        mid = _live_maps.pop(key, None)
+        if mid:
+            try:
+                await bot.delete_message(chat_id=chat_id, message_id=mid)
+            except Exception:
+                pass
+
+
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -199,6 +211,7 @@ async def _driver_screen(telegram_id: int):
 
 @router.callback_query(F.data.startswith("mycar:"))
 async def cb_mycar(cb: CallbackQuery):
+    await _cleanup_maps(cb.message.chat.id, cb.bot)
     if _is_admin(cb.from_user.id):
         await cb.answer()
         return
@@ -214,6 +227,7 @@ async def cb_mycar(cb: CallbackQuery):
 
 @router.callback_query(F.data == "m:main")
 async def cb_main(cb: CallbackQuery, state: FSMContext):
+    await _cleanup_maps(cb.message.chat.id, cb.bot)
     await state.clear()
     await _show_main(cb)
     await cb.answer()
@@ -225,6 +239,7 @@ async def cb_main(cb: CallbackQuery, state: FSMContext):
 
 @router.callback_query(F.data == "m:trips")
 async def cb_trips(cb: CallbackQuery, state: FSMContext):
+    await _cleanup_maps(cb.message.chat.id, cb.bot)
     await state.clear()
     is_admin = _is_admin(cb.from_user.id)
     trips = await db.get_active_trips()
@@ -262,6 +277,7 @@ async def _trip_detail(tid: int, is_admin: bool):
 
 @router.callback_query(F.data.startswith("trip:"))
 async def cb_trip_detail(cb: CallbackQuery, state: FSMContext):
+    await _cleanup_maps(cb.message.chat.id, cb.bot)
     await state.clear()
     tid = int(cb.data.split(":")[1])
     text, kb = await _trip_detail(tid, _is_admin(cb.from_user.id))
@@ -338,6 +354,7 @@ async def _vehicle_detail(vid: int):
 
 @router.callback_query(F.data == "m:veh")
 async def cb_veh(cb: CallbackQuery, state: FSMContext):
+    await _cleanup_maps(cb.message.chat.id, cb.bot)
     if not _is_admin(cb.from_user.id):
         await cb.answer("Недостатньо прав.", show_alert=True)
         return
@@ -732,6 +749,7 @@ async def cb_al_del_do(cb: CallbackQuery):
 
 @router.callback_query(F.data == "m:news")
 async def cb_news(cb: CallbackQuery):
+    await _cleanup_maps(cb.message.chat.id, cb.bot)
     await cb.answer("Завантажую новини…")
     await _safe_edit(cb.message, "📰 Завантажую новини PUESC (SENT)…", None)
     items = await news.fetch_news()
@@ -757,6 +775,7 @@ async def cb_news(cb: CallbackQuery):
 
 @router.callback_query(F.data.startswith("chk:"))
 async def cb_check_do(cb: CallbackQuery):
+    await _cleanup_maps(cb.message.chat.id, cb.bot)
     tid = int(cb.data.split(":")[1])
     trip = await db.get_trip(tid)
     if not trip:
@@ -812,17 +831,10 @@ async def cb_check_do(cb: CallbackQuery):
     ]])
     await _safe_edit(cb.message, "\n".join(lines), kb)
 
-    # Show the vehicle position on a map pin. Delete the previous pin first so
-    # the chat keeps only one (current) map per trip instead of piling them up.
+    # Show the vehicle position on a map pin (manual check only).
     if best:
         lat, lon, role = best
         key = (cb.message.chat.id, tid)
-        old_mid = _live_maps.pop(key, None)
-        if old_mid:
-            try:
-                await cb.bot.delete_message(chat_id=key[0], message_id=old_mid)
-            except Exception:
-                pass
         try:
             sent = await cb.message.answer_location(latitude=lat, longitude=lon)
             _live_maps[key] = sent.message_id
@@ -847,9 +859,10 @@ async def _delete(msg: Message):
 # ---------------------------------------------------------------------------
 
 @router.message()
-async def fallback(msg: Message, state: FSMContext):
+async def fallback(msg: Message, state: FSMContext, bot: Bot):
     if await state.get_state() is not None:
         return  # an FSM handler will deal with it
+    await _cleanup_maps(msg.chat.id, bot)
     await _delete(msg)
     if _is_admin(msg.from_user.id):
         await msg.answer(_MENU_TITLE_ADMIN, reply_markup=_admin_menu_kb(), parse_mode="HTML")

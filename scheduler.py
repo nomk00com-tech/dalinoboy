@@ -1,6 +1,7 @@
 """
 Scheduled GPS checks — runs every CHECK_INTERVAL_MINUTES minutes.
 
+
 Two-stage, vehicle-level, movement-aware alerting (per client requirement):
   - GPS must transmit WHILE DRIVING. When PARKED the locator may legitimately go
     silent (driver may even switch GPS off) — those must NOT trigger alerts.
@@ -20,6 +21,7 @@ Anti-spam:
 
 import logging
 import math
+from datetime import datetime as _dt
 import os
 
 from aiogram import Bot
@@ -66,8 +68,10 @@ def _was_moving(history: list[dict]) -> bool:
     Looks at the coordinates of the most recent signal_ok checks. If they spread
     out by more than MOVE_THRESHOLD_M, the vehicle was en route when the signal
     dropped. If they are clustered (or unknown), it was standing still (parked).
-    Unknown history (<2 reporting points) defaults to True so a genuine early
-    loss is not silently ignored.
+    Unknown history (<2 reporting points) defaults to **False** — if we have no
+    evidence that the vehicle was moving we must NOT trigger an alarm (the client
+    requires alerts only while driving; a parked vehicle may legitimately be
+    silent).
     """
     pts = []
     for h in history:  # newest first
@@ -76,7 +80,7 @@ def _was_moving(history: list[dict]) -> bool:
         if len(pts) >= 4:
             break
     if len(pts) < 2:
-        return True
+        return False
     max_d = 0.0
     for i in range(len(pts)):
         for j in range(i + 1, len(pts)):
@@ -348,6 +352,7 @@ def start_scheduler(bot: Bot) -> AsyncIOScheduler:
         name="PUESC GPS check",
         replace_existing=True,
         misfire_grace_time=60,
+        next_run_time=_dt.now(),       # run immediately on deploy
     )
     scheduler.add_job(
         run_news_check,
@@ -358,6 +363,7 @@ def start_scheduler(bot: Bot) -> AsyncIOScheduler:
         name="PUESC news monitor",
         replace_existing=True,
         misfire_grace_time=120,
+        next_run_time=_dt.now(),       # run immediately on deploy
     )
     scheduler.start()
     log.info("Scheduler started — GPS every %d min (warn %d min / fine %d min lost-while-moving), news every %d min.",

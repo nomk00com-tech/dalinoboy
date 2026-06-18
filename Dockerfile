@@ -11,6 +11,8 @@ RUN pip install --no-cache-dir -r requirements.txt
 RUN apt-get update && apt-get install -y --no-install-recommends \
     libnss3 \
     libatk1.0-0 \
+    libatk-bridge2.0-0 \
+    libatspi2.0-0 \
     libcups2 \
     libdrm2 \
     libxkbcommon0 \

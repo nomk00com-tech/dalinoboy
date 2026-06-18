@@ -179,7 +179,6 @@ def _interpret(page_text: str, base: dict) -> CheckResult:
         now_ref = _parse_datetime_pl(m_now.group(1))
     if now_ref is None:
         now_ref = _warsaw_now()
-    log.info("DIAG now_ref=%s src=%s", now_ref, "page" if m_now else "fallback")
 
     # Status zgłoszenia (Kompletne / Niekompletne / Zamknięte ...)
     decl_status = None
@@ -288,7 +287,12 @@ async def check_one(rmpd: str, plate: str, tracker_number: str, tracker_id: int 
     """Check a single tracker. Opens a browser, checks, closes (no login)."""
     async with async_playwright() as pw:
         browser = await pw.chromium.launch(headless=HEADLESS)
-        ctx = await browser.new_context(locale="pl-PL")
+        # Force the browser timezone to Warsaw: PUESC renders the GPS position
+        # time ("Czas:") in the BROWSER's local timezone via JavaScript. On a UTC
+        # server (Railway) that made fresh positions look ~2 h stale → false
+        # "no signal". Pinning the browser tz to Warsaw keeps it consistent with
+        # the page's Warsaw "now", so the signal age is computed correctly.
+        ctx = await browser.new_context(locale="pl-PL", timezone_id="Europe/Warsaw")
         page = await ctx.new_page()
         try:
             return await _check_one_page(page, rmpd, plate, tracker_number, tracker_id)
@@ -310,7 +314,12 @@ async def check_trip_trackers(trip: dict, trackers: list[dict]) -> list[CheckRes
 
     async with async_playwright() as pw:
         browser = await pw.chromium.launch(headless=HEADLESS)
-        ctx = await browser.new_context(locale="pl-PL")
+        # Force the browser timezone to Warsaw: PUESC renders the GPS position
+        # time ("Czas:") in the BROWSER's local timezone via JavaScript. On a UTC
+        # server (Railway) that made fresh positions look ~2 h stale → false
+        # "no signal". Pinning the browser tz to Warsaw keeps it consistent with
+        # the page's Warsaw "now", so the signal age is computed correctly.
+        ctx = await browser.new_context(locale="pl-PL", timezone_id="Europe/Warsaw")
         page = await ctx.new_page()
         try:
             for t in trackers:

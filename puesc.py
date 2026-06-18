@@ -12,7 +12,7 @@ import logging
 import os
 import re
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 from playwright.async_api import async_playwright, TimeoutError as PlaywrightTimeoutError
 from dotenv import load_dotenv
@@ -20,6 +20,34 @@ from dotenv import load_dotenv
 load_dotenv()
 
 log = logging.getLogger(__name__)
+
+# PUESC prints all timestamps in Warsaw local time. The server may run in UTC
+# (e.g. Railway), so a naive datetime.now() would be skewed by 1-2 h and make a
+# fresh GPS position look "stale" → false signal_missing. We anchor "now" to
+# Warsaw instead. (tzdata is pinned in requirements so zoneinfo works on slim
+# images and Windows, which ship no system tz database.)
+try:
+    from zoneinfo import ZoneInfo
+    _WARSAW_TZ = ZoneInfo("Europe/Warsaw")
+except Exception:  # pragma: no cover — tzdata/zoneinfo unavailable
+    _WARSAW_TZ = None
+
+
+def _warsaw_now() -> datetime:
+    """Current Warsaw wall-clock time as a naive datetime (matches PUESC pages)."""
+    if _WARSAW_TZ is not None:
+        return datetime.now(_WARSAW_TZ).replace(tzinfo=None)
+    # Fallback if tzdata is missing: approximate Poland's CET/CEST DST manually.
+    now = datetime.now(timezone.utc).replace(tzinfo=None)
+
+    def _last_sunday(year: int, month: int) -> datetime:
+        d = datetime(year, month, 31)
+        return d - timedelta(days=(d.weekday() + 1) % 7)
+
+    dst_start = _last_sunday(now.year, 3).replace(hour=1)    # 01:00 UTC
+    dst_end = _last_sunday(now.year, 10).replace(hour=1)
+    offset = 2 if dst_start <= now < dst_end else 1
+    return now + timedelta(hours=offset)
 
 # RMPD-406 form is public — "Usługa jest dostępna bez logowania" (no login needed).
 FORM_URL = (
@@ -32,7 +60,7 @@ FORM_URL = (
 # transmitting right now" (signal_missing). The scheduler then decides — based on
 # movement + duration — whether that actually warrants an alert. Device normally
 # reports every few minutes, so ~15 min of silence means it stopped.
-SIGNAL_FRESH_MINUTES = int(os.getenv("SIGNAL_FRESH_MINUTES", "15"))
+SIGNAL_FRESH_MINUTES = int(os.getenv("SIGNAL_FRESH_MINUTES", "20"))
 
 # Run the browser headless. checker.py --headed flips this to False for debugging.
 HEADLESS = os.getenv("PUESC_HEADLESS", "1") != "0"
@@ -150,7 +178,7 @@ def _interpret(page_text: str, base: dict) -> CheckResult:
     if m_now:
         now_ref = _parse_datetime_pl(m_now.group(1))
     if now_ref is None:
-        now_ref = datetime.now()
+        now_ref = _warsaw_now()
 
     # Status zgłoszenia (Kompletne / Niekompletne / Zamknięte ...)
     decl_status = None

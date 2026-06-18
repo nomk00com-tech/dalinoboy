@@ -88,6 +88,40 @@ def _was_moving(history: list[dict]) -> bool:
     return max_d > MOVE_THRESHOLD_M
 
 
+def _parse_lp(value) -> "_dt | None":
+    """Parse a stored last_position_time (ISO string) back to a datetime."""
+    if not value:
+        return None
+    if isinstance(value, _dt):
+        return value
+    try:
+        return _dt.fromisoformat(value)
+    except (ValueError, TypeError):
+        return None
+
+
+def effective_status(result, history: list[dict]) -> str:
+    """Robust GPS status — corrects PUESC's freshness call via timestamp advancement.
+
+    PUESC labels a locator 'missing' once its last position is older than
+    SIGNAL_FRESH_MINUTES. But the SENT-GEO portal often lags, so a moving,
+    perfectly-transmitting vehicle can show a 15-30 min old position. If that
+    position TIMESTAMP advanced since the previous check, the locator clearly
+    IS transmitting → treat it as signal_ok. This is independent of timezone and
+    of GEO lag, so it fixes "map shows movement but text says no signal".
+
+    `history` is newest-first and taken BEFORE the current check is saved, so
+    history[0] (with a timestamp) is the previous check.
+    """
+    if result.status != "signal_missing" or result.last_position is None:
+        return result.status
+    for h in history:
+        prev = _parse_lp(h.get("last_position_time"))
+        if prev is not None:
+            return "signal_ok" if result.last_position > prev else result.status
+    return result.status
+
+
 def _missing_minutes_fallback(history: list[dict]) -> float:
     """Rough silence duration when PUESC gave no timestamp (e.g. błąd 200):
     leading consecutive signal_missing checks × check interval."""
@@ -113,7 +147,7 @@ def _stage_for(silence_min: float, moving: bool) -> int:
 
 def decide_alarm(result, history: list[dict]) -> tuple[bool, float, bool]:
     """Back-compat helper for the manual check screen: (alarm, silence, moving)."""
-    if result.status != "signal_missing":
+    if effective_status(result, history) != "signal_missing":
         return (False, 0.0, False)
     moving = _was_moving(history)
     silence = result.signal_age_min
@@ -162,20 +196,25 @@ async def run_scheduled_checks(bot: Bot):
         # and gather movement/silence info at the VEHICLE level.
         any_moving = False
         ages = []
+        statuses = []
         for r in results:
             history = await db.get_check_history(trip["id"], r.tracker_id, limit=20)
+            # Robust status: a still-advancing position counts as transmitting,
+            # even if PUESC flagged it stale (GEO lag / timezone skew).
+            status = effective_status(r, history)
+            statuses.append(status)
             await db.save_check(
-                trip["id"], r.tracker_id, r.status, r.last_position, r.message,
+                trip["id"], r.tracker_id, status, r.last_position, r.message,
                 latitude=r.latitude, longitude=r.longitude, alarm=0,
             )
-            if r.status == "signal_missing":
+            if status == "signal_missing":
                 if _was_moving(history):
                     any_moving = True
                 ages.append(r.signal_age_min if r.signal_age_min is not None
                             else _missing_minutes_fallback(history) + CHECK_INTERVAL_MINUTES)
 
             # invalid_data (wrong RMPD/number) → tell admins once per tracker.
-            if r.status == "invalid_data":
+            if status == "invalid_data":
                 prev_status = history[0]["status"] if history else None  # history is pre-save
                 if prev_status != "invalid_data":
                     tr = next((t for t in trackers if t["id"] == r.tracker_id), None)
@@ -187,7 +226,7 @@ async def run_scheduled_checks(bot: Bot):
                     )
 
         # Vehicle is "covered" if at least one tracker reports a fresh position.
-        covered = any(r.status == "signal_ok" for r in results)
+        covered = any(s == "signal_ok" for s in statuses)
         prev_stage = trip.get("alarm_stage", 0) or 0
         best = _freshest(results)
 

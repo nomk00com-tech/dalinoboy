@@ -37,6 +37,15 @@ ADMIN_IDS: set[int] = {int(x.strip()) for x in os.getenv("ADMIN_IDS", "").split(
 # previous map and posts a fresh one instead of piling up maps in the chat.
 _live_maps: dict[tuple[int, int], int] = {}
 
+# Human-readable Ukrainian labels for the raw check status enum.
+_STATUS_TEXT = {
+    "signal_ok": "сигнал є",
+    "signal_missing": "немає сигналу",
+    "invalid_data": "невірні дані",
+    "site_error": "сайт PUESC недоступний",
+    "unknown_response": "невідома відповідь",
+}
+
 
 async def _cleanup_maps(chat_id: int, bot: Bot):
     """Delete every live map pin belonging to this chat."""
@@ -791,36 +800,43 @@ async def cb_check_do(cb: CallbackQuery):
         return
 
     results = await puesc.check_trip_trackers(trip, trackers)
-    missing = sum(1 for r in results if r.status == "signal_missing")
     prov_by_id = {t["id"]: t["provider"] for t in trackers}
 
     lines = [f"<b>Рейс #{tid} — {trip['vehicle_name']} ({trip['plate_number']})</b>",
              f"RMPD: <code>{trip['rmpd_number']}</code>\n"]
     best = None  # (lat, lon, label) to drop a map pin for
+    eff_statuses = []
     for r in results:
-        icon = {"signal_ok": "✅", "signal_missing": "❌", "invalid_data": "❓",
-                "site_error": "🔴", "unknown_response": "❔"}.get(r.status, "❔")
         role = prov_by_id.get(r.tracker_id, "Трекер")
         lp = r.last_position.strftime("%d.%m.%Y %H:%M") if r.last_position else "N/A"
         history = await db.get_check_history(tid, r.tracker_id, limit=20)
+        # Robust status (advancing position = transmitting, even if PUESC said stale).
+        status = scheduler.effective_status(r, history)
+        eff_statuses.append(status)
         alarm_now, silence_min, moving = scheduler.decide_alarm(r, history)
-        await db.save_check(tid, r.tracker_id, r.status, r.last_position, r.message,
+        await db.save_check(tid, r.tracker_id, status, r.last_position, r.message,
                             latitude=r.latitude, longitude=r.longitude, alarm=alarm_now)
-        line = f"{icon} <b>{role}</b>: <code>{r.tracker_number}</code> — {r.status}\n   Остання позиція: {lp}"
+        icon = {"signal_ok": "✅", "signal_missing": "❌", "invalid_data": "❓",
+                "site_error": "🔴", "unknown_response": "❔"}.get(status, "❔")
+        label = _STATUS_TEXT.get(status, status)
+        line = f"{icon} <b>{role}</b>: <code>{r.tracker_number}</code> — {label}\n   Остання позиція: {lp}"
+        if status == "signal_ok" and r.signal_age_min is not None:
+            line += f" (оновлено ~{r.signal_age_min:.0f} хв тому)"
         if r.latitude is not None and r.longitude is not None:
             line += f"\n   📍 {r.latitude:.5f}, {r.longitude:.5f}"
             # Prefer a working tracker's position for the map pin.
-            if best is None or r.status == "signal_ok":
+            if best is None or status == "signal_ok":
                 best = (r.latitude, r.longitude, role)
-        if r.status == "signal_missing":
+        if status == "signal_missing":
             st = "🚗 рух → ТРИВОГА" if (moving and alarm_now) else \
                  ("🚗 рух, очікування" if moving else "🅿️ стоянка (без тривоги)")
             line += f"\n   ⏱ без сигналу ~{silence_min:.0f} хв — {st}"
         line += f"\n   {r.message}"
         lines.append(line)
 
+    missing = sum(1 for s in eff_statuses if s == "signal_missing")
     if len(results) > 1:
-        ok_count = sum(1 for r in results if r.status == "signal_ok")
+        ok_count = sum(1 for s in eff_statuses if s == "signal_ok")
         if missing == len(results):
             lines.append("\n🚨 <b>КРИТИЧНО: обидва трекери без сигналу!</b>")
         elif missing > 0 and ok_count > 0:

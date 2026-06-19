@@ -36,6 +36,9 @@ _ARTICLE_URL = (
 
 HEADLESS = os.getenv("PUESC_HEADLESS", "1") != "0"
 
+# Same hardening flags as puesc.py: avoid sandbox/dev-shm crashes and GPU on headless servers.
+_CHROMIUM_ARGS = ["--no-sandbox", "--disable-dev-shm-usage", "--disable-gpu"]
+
 # Words that mark an operational/availability announcement worth highlighting.
 ALERT_KEYWORDS = [
     "awari",            # awaria / awarii
@@ -82,7 +85,7 @@ def _is_alert(title: str) -> bool:
 async def fetch_news() -> list[dict]:
     """Load the SENT news category and return parsed articles (newest first)."""
     async with async_playwright() as pw:
-        browser = await pw.chromium.launch(headless=HEADLESS)
+        browser = await pw.chromium.launch(headless=HEADLESS, args=_CHROMIUM_ARGS)
         ctx = await browser.new_context(locale="pl-PL")
         page = await ctx.new_page()
         try:

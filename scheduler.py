@@ -19,6 +19,7 @@ Anti-spam:
   - invalid_data (wrong RMPD/plate/locator): notify admins once.
 """
 
+import html
 import logging
 import math
 from datetime import datetime as _dt
@@ -41,11 +42,18 @@ WARN_MINUTES = int(os.getenv("WARN_MINUTES", "30"))
 FINE_MINUTES = int(os.getenv("FINE_MINUTES", "60"))
 MOVE_THRESHOLD_M = float(os.getenv("MOVE_THRESHOLD_M", "500"))  # min displacement counted as "moving"
 NEWS_INTERVAL_MINUTES = int(os.getenv("NEWS_INTERVAL_MINUTES", "30"))
+# How long to keep GPS check history before pruning (keeps trip_checks bounded).
+CHECK_RETENTION_DAYS = int(os.getenv("CHECK_RETENTION_DAYS", "14"))
 
 # Alarm stages stored in trips.alarm_stage
 STAGE_OK, STAGE_WARN, STAGE_FINE = 0, 1, 2
 
 _site_error_notified = False
+
+
+def _e(value) -> str:
+    """Escape user/external text for safe insertion into parse_mode=HTML messages."""
+    return html.escape(str(value)) if value is not None else ""
 
 
 # ---------------------------------------------------------------------------
@@ -184,7 +192,7 @@ async def run_scheduled_checks(bot: Bot):
                 await _notify_admins(
                     bot,
                     "🔴 <b>PUESC niedostępny</b>\n"
-                    f"Не вдалося перевірити рейс {trip['id']} — {trip['vehicle_name']}.\n"
+                    f"Не вдалося перевірити рейс {trip['id']} — {_e(trip['vehicle_name'])}.\n"
                     "Автоматичні перевірки продовжаться.",
                 )
                 _site_error_notified = True
@@ -220,9 +228,9 @@ async def run_scheduled_checks(bot: Bot):
                     tr = next((t for t in trackers if t["id"] == r.tracker_id), None)
                     await _notify_admins(
                         bot,
-                        f"❓ <b>Невірні дані</b>\nРейс — {trip['vehicle_name']}\n"
-                        f"Трекер {tr['provider'] if tr else '?'}/{r.tracker_number}\n"
-                        f"RMPD: {trip['rmpd_number']}\n\n{r.message}",
+                        f"❓ <b>Невірні дані</b>\nРейс — {_e(trip['vehicle_name'])}\n"
+                        f"Трекер {_e(tr['provider'] if tr else '?')}/{_e(r.tracker_number)}\n"
+                        f"RMPD: {_e(trip['rmpd_number'])}\n\n{_e(r.message)}",
                     )
 
         # Vehicle is "covered" if at least one tracker reports a fresh position.
@@ -283,7 +291,7 @@ def _news_msg(it: dict) -> str:
     date = f"\n🗓 {it['date']}" if it.get("date") else ""
     return (
         f"{head}\n"
-        f"{it['title']}{date}\n"
+        f"{_e(it['title'])}{date}\n"
         f"<a href='{it['url']}'>Читати на puesc.gov.pl</a>"
     )
 
@@ -307,8 +315,8 @@ def _last_pos_str(r) -> str:
 def _warn_msg(trip: dict, r, silence_min: float) -> str:
     return (
         f"⚠️ <b>Зник GPS-сигнал — зупиніться!</b>\n"
-        f"Авто: {trip['vehicle_name']} ({trip['plate_number']})\n"
-        f"RMPD: {trip['rmpd_number']}\n"
+        f"Авто: {_e(trip['vehicle_name'])} ({_e(trip['plate_number'])})\n"
+        f"RMPD: {_e(trip['rmpd_number'])}\n"
         f"Немає сигналу вже ~{silence_min:.0f} хв.\n"
         f"Остання позиція: {_last_pos_str(r)}\n\n"
         f"❗️ Знайдіть парковку, зупиніться і чекайте, доки зв'язок відновиться. "
@@ -319,8 +327,8 @@ def _warn_msg(trip: dict, r, silence_min: float) -> str:
 def _fine_msg(trip: dict, r, silence_min: float) -> str:
     return (
         f"🚨 <b>ШТРАФ! Годину без GPS-сигналу під час руху</b>\n"
-        f"Авто: {trip['vehicle_name']} ({trip['plate_number']})\n"
-        f"RMPD: {trip['rmpd_number']}\n"
+        f"Авто: {_e(trip['vehicle_name'])} ({_e(trip['plate_number'])})\n"
+        f"RMPD: {_e(trip['rmpd_number'])}\n"
         f"Немає сигналу вже ~{silence_min:.0f} хв.\n"
         f"Остання позиція: {_last_pos_str(r)}"
     )
@@ -329,8 +337,8 @@ def _fine_msg(trip: dict, r, silence_min: float) -> str:
 def _recovered_msg(trip: dict, r) -> str:
     return (
         f"✅ <b>GPS-сигнал відновлено</b>\n"
-        f"Авто: {trip['vehicle_name']} ({trip['plate_number']})\n"
-        f"RMPD: {trip['rmpd_number']}\n"
+        f"Авто: {_e(trip['vehicle_name'])} ({_e(trip['plate_number'])})\n"
+        f"RMPD: {_e(trip['rmpd_number'])}\n"
         f"Остання позиція: {_last_pos_str(r)}"
     )
 
@@ -377,6 +385,20 @@ def _admin_ids() -> list[int]:
 
 
 # ---------------------------------------------------------------------------
+# Maintenance
+# ---------------------------------------------------------------------------
+
+async def _prune_checks():
+    """Daily: drop GPS check history older than the retention window."""
+    try:
+        deleted = await db.prune_old_checks(CHECK_RETENTION_DAYS)
+        if deleted:
+            log.info("Pruned %d old trip_checks row(s).", deleted)
+    except Exception as exc:
+        log.warning("prune_old_checks failed: %s", exc)
+
+
+# ---------------------------------------------------------------------------
 # Scheduler setup
 # ---------------------------------------------------------------------------
 
@@ -403,6 +425,15 @@ def start_scheduler(bot: Bot) -> AsyncIOScheduler:
         replace_existing=True,
         misfire_grace_time=120,
         next_run_time=_dt.now(),       # run immediately on deploy
+    )
+    scheduler.add_job(
+        _prune_checks,
+        trigger="interval",
+        hours=24,
+        id="prune_checks",
+        name="Prune old GPS checks",
+        replace_existing=True,
+        misfire_grace_time=3600,
     )
     scheduler.start()
     log.info("Scheduler started — GPS every %d min (warn %d min / fine %d min lost-while-moving), news every %d min.",

@@ -10,10 +10,11 @@ UX principles:
 Notifications about GPS status come from scheduler.py (separate alert messages).
 """
 
+import html
 import logging
 import os
 
-from aiogram import Bot, Router, F
+from aiogram import BaseMiddleware, Bot, Router, F
 from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
@@ -65,6 +66,43 @@ async def _cleanup_maps(chat_id: int, bot: Bot):
 
 def _is_admin(telegram_id: int) -> bool:
     return telegram_id in ADMIN_IDS
+
+
+def _e(value) -> str:
+    """Escape user/external text before it goes into a parse_mode=HTML message.
+
+    Vehicle names, RMPD numbers and PUESC-sourced text (news titles, raw_message)
+    may contain <, > or & which would otherwise break the message (Telegram
+    rejects malformed HTML → the whole notification fails to send).
+    """
+    return html.escape(str(value)) if value is not None else ""
+
+
+# ---------------------------------------------------------------------------
+# Authorization guard (defence in depth)
+# ---------------------------------------------------------------------------
+# Non-admins (drivers) may only use these callbacks — the driver screen plus
+# read-only trip views. Every other callback is admin-only. This is enforced
+# centrally so that ANY new admin button is blocked for drivers by default
+# (closes privilege-escalation holes like delok:/vehdelok: that skipped checks).
+_DRIVER_CALLBACKS_EXACT = {"m:main", "m:trips", "m:news"}
+_DRIVER_CALLBACK_PREFIXES = ("mycar:", "trip:", "chk:")
+
+
+class AdminGuard(BaseMiddleware):
+    """Block non-admins from admin-only callback actions."""
+
+    async def __call__(self, handler, event, data):
+        data_str = event.data or ""
+        if (_is_admin(event.from_user.id)
+                or data_str in _DRIVER_CALLBACKS_EXACT
+                or data_str.startswith(_DRIVER_CALLBACK_PREFIXES)):
+            return await handler(event, data)
+        await event.answer("Недостатньо прав.", show_alert=True)
+        return None
+
+
+router.callback_query.outer_middleware(AdminGuard())
 
 
 def _btn(text: str, data: str) -> InlineKeyboardButton:
@@ -186,7 +224,7 @@ async def cmd_start(msg: Message, state: FSMContext):
         await msg.answer(
             "🚫 Доступ закрито.\n\n"
             "Зверніться до адміністратора, щоб він додав вас у список водіїв.\n"
-            f"Ваш ID: <code>{user.id}</code>\nВаш username: {uname}",
+            f"Ваш ID: <code>{user.id}</code>\nВаш username: {_e(uname)}",
             parse_mode="HTML",
         )
 
@@ -203,7 +241,7 @@ async def _driver_screen(telegram_id: int):
     if vid:
         v = await db.get_vehicle(vid)
         if v:
-            text = (f"🚚 <b>Ваша машина:</b> {v['name']} ({v['plate_number']})\n\n"
+            text = (f"🚚 <b>Ваша машина:</b> {_e(v['name'])} ({_e(v['plate_number'])})\n\n"
                     "Сповіщення про GPS цієї машини приходитимуть саме вам.")
         else:
             text = "🚚 Ваша машина більше не існує. Оберіть іншу:"
@@ -268,14 +306,14 @@ async def _trip_detail(tid: int, is_admin: bool):
     if not trip:
         return "Рейс не знайдено.", InlineKeyboardMarkup(inline_keyboard=[[_btn("⬅️ Рейси", "m:trips")]])
     rmpds = await db.get_trip_rmpds(tid)
-    lines = [f"🚛 <b>{trip['vehicle_name']}</b> ({trip['plate_number']})",
+    lines = [f"🚛 <b>{_e(trip['vehicle_name'])}</b> ({_e(trip['plate_number'])})",
              f"Створено: {trip['created_at'][:16]}\n",
-             f"📍 Поточний RMPD (їдемо по ньому):\n<code>{trip['rmpd_number']}</code>"]
+             f"📍 Поточний RMPD (їдемо по ньому):\n<code>{_e(trip['rmpd_number'])}</code>"]
     if len(rmpds) > 1:
         lines.append("\n🗂 Історія RMPD (старі вже не моніторяться):")
         for i, r in enumerate(rmpds, 1):
             mark = "🟢 поточний" if r["rmpd_number"] == trip["rmpd_number"] else "▫️ старий"
-            lines.append(f"  {i}. <code>{r['rmpd_number']}</code> — {mark}")
+            lines.append(f"  {i}. <code>{_e(r['rmpd_number'])}</code> — {mark}")
     rows = [[_btn("🔍 Перевірити", f"chk:{tid}")]]
     if is_admin:
         rows.append([_btn("➕ Новий RMPD", f"rmpdadd:{tid}")])
@@ -318,9 +356,9 @@ async def add_rmpd_do(msg: Message, state: FSMContext, bot: Bot):
     await state.clear()
     try:
         await db.add_trip_rmpd(tid, rmpd)
-        prefix = f"✅ Новий RMPD <code>{rmpd}</code> — тепер моніторимо його.\n\n"
+        prefix = f"✅ Новий RMPD <code>{_e(rmpd)}</code> — тепер моніторимо його.\n\n"
     except Exception as exc:
-        prefix = f"⚠️ Помилка: {exc}\n\n"
+        prefix = f"⚠️ Помилка: {_e(exc)}\n\n"
     text, kb = await _trip_detail(tid, True)
     await _edit_anchor(bot, msg.chat.id, data["anchor"], prefix + text, kb)
 
@@ -344,13 +382,13 @@ async def _vehicle_detail(vid: int):
     if not v:
         return "Авто не знайдено.", InlineKeyboardMarkup(inline_keyboard=[[_btn("⬅️ До списку", "m:veh")]])
     trackers = await db.get_trackers_for_vehicle(vid)
-    lines = [f"🚗 <b>{v['name']}</b> ({v['plate_number']})", ""]
+    lines = [f"🚗 <b>{_e(v['name'])}</b> ({_e(v['plate_number'])})", ""]
     rows = [[_btn("✏️ Назва", f"vehname:{vid}"), _btn("🔢 Номер", f"vehplate:{vid}")]]
     for role in ("main", "backup"):
         t = _tracker_by_role(trackers, role)
         label, icon = ROLE_LABEL[role], ROLE_ICON[role]
         if t:
-            lines.append(f"{icon} <b>{label}</b>: <code>{t['tracker_number']}</code>")
+            lines.append(f"{icon} <b>{label}</b>: <code>{_e(t['tracker_number'])}</code>")
             rows.append([_btn(f"📡 {label}: {t['tracker_number']}", f"trkslot:{vid}:{role}")])
         else:
             lines.append(f"{icon} <b>{label}</b>: <i>не додано</i>")
@@ -405,7 +443,7 @@ async def add_veh_name(msg: Message, state: FSMContext, bot: Bot):
     await state.update_data(name=name)
     await state.set_state(AddVehicle.plate)
     await _edit_anchor(bot, msg.chat.id, data["anchor"],
-                       f"🚗 Авто: <b>{name}</b>\nВведіть <b>номерний знак</b> (напр.: BC8849PO):", _cancel_kb())
+                       f"🚗 Авто: <b>{_e(name)}</b>\nВведіть <b>номерний знак</b> (напр.: BC8849PO):", _cancel_kb())
 
 
 @router.message(AddVehicle.plate)
@@ -419,7 +457,7 @@ async def add_veh_plate(msg: Message, state: FSMContext, bot: Bot):
         text, kb = await _vehicle_detail(vid)
         text = "✅ Авто додано.\n\n" + text
     except Exception as exc:
-        text, kb = f"⚠️ Помилка: {exc}", InlineKeyboardMarkup(inline_keyboard=[[_btn("⬅️ До списку", "m:veh")]])
+        text, kb = f"⚠️ Помилка: {_e(exc)}", InlineKeyboardMarkup(inline_keyboard=[[_btn("⬅️ До списку", "m:veh")]])
     await _edit_anchor(bot, msg.chat.id, data["anchor"], text, kb)
 
 
@@ -465,7 +503,7 @@ async def edit_veh_plate(msg: Message, state: FSMContext, bot: Bot):
         text, kb = await _vehicle_detail(data["vehicle_id"])
         text = "✅ Номер змінено.\n\n" + text
     except Exception as exc:
-        text, kb = f"⚠️ Помилка: {exc}", InlineKeyboardMarkup(inline_keyboard=[[_btn("⬅️ До списку", "m:veh")]])
+        text, kb = f"⚠️ Помилка: {_e(exc)}", InlineKeyboardMarkup(inline_keyboard=[[_btn("⬅️ До списку", "m:veh")]])
     await _edit_anchor(bot, msg.chat.id, data["anchor"], text, kb)
 
 
@@ -479,7 +517,7 @@ async def cb_veh_del_confirm(cb: CallbackQuery):
         _btn("🗑 Так, видалити", f"vehdelok:{vid}"), _btn("✖️ Назад", f"veh:{vid}"),
     ]])
     await _safe_edit(cb.message,
-                     f"🗑 Видалити авто <b>{v['name']}</b> ({v['plate_number']})?\n"
+                     f"🗑 Видалити авто <b>{_e(v['name'])}</b> ({_e(v['plate_number'])})?\n"
                      f"Разом з трекерами, рейсами та історією. Незворотно.", kb)
     await cb.answer()
 
@@ -515,7 +553,7 @@ async def cb_trk_slot(cb: CallbackQuery, state: FSMContext):
         ])
         await _safe_edit(cb.message,
                          f"{ROLE_ICON[role]} <b>{label} трекер</b>\n"
-                         f"Номер: <code>{t['tracker_number']}</code>", kb)
+                         f"Номер: <code>{_e(t['tracker_number'])}</code>", kb)
     else:
         # Empty slot — ask for number.
         await state.set_state(AddTracker.number)
@@ -544,14 +582,14 @@ async def add_trk_number(msg: Message, state: FSMContext, bot: Bot):
     await _delete(msg)
     await state.clear()
     if not puesc.LOCATOR_RE.match(number):
-        prefix = (f"⚠️ Номер <code>{number}</code> має невірний формат "
+        prefix = (f"⚠️ Номер <code>{_e(number)}</code> має невірний формат "
                   f"(очікується напр. <b>Z21-AF67XZ-8</b>).\n\n")
     else:
         try:
             await db.add_tracker(vid, data["provider"], number)   # upsert by (vehicle, role)
             prefix = f"✅ {data['provider']} трекер збережено.\n\n"
         except Exception as exc:
-            prefix = f"⚠️ Помилка: {exc}\n\n"
+            prefix = f"⚠️ Помилка: {_e(exc)}\n\n"
     text, kb = await _vehicle_detail(vid)
     await _edit_anchor(bot, msg.chat.id, data["anchor"], prefix + text, kb)
 
@@ -600,7 +638,7 @@ async def cb_trip_vehicle(cb: CallbackQuery, state: FSMContext):
     await state.update_data(vehicle_id=vid, anchor=cb.message.message_id)
     await state.set_state(AddTrip.rmpd)
     await _safe_edit(cb.message,
-                     f"➕ Авто: <b>{v['name']}</b> ({v['plate_number']})\n"
+                     f"➕ Авто: <b>{_e(v['name'])}</b> ({_e(v['plate_number'])})\n"
                      f"Введіть <b>номер RMPD</b> (напр.: RMPD20260607000433):", _cancel_kb())
     await cb.answer()
 
@@ -616,7 +654,7 @@ async def add_trip_rmpd(msg: Message, state: FSMContext, bot: Bot):
         text, kb = await _trip_detail(trip_id, True)
         text = "✅ Рейс додано.\n\n" + text
     except Exception as exc:
-        text, kb = f"⚠️ Помилка: {exc}", _back_kb()
+        text, kb = f"⚠️ Помилка: {_e(exc)}", _back_kb()
     await _edit_anchor(bot, msg.chat.id, data["anchor"], text, kb)
 
 
@@ -668,12 +706,12 @@ async def _access_screen():
              "натискає /start і обирає свою машину — і отримує сповіщення лише по ній.\n"]
     if entries:
         for e in entries:
-            who = f"@{e['username']}" if e["username"] else f"ID <code>{e['telegram_id']}</code>"
+            who = f"@{_e(e['username'])}" if e["username"] else f"ID <code>{e['telegram_id']}</code>"
             u = await db.find_user(e["telegram_id"], e["username"])
             if u:
                 v = await db.get_vehicle(u["vehicle_id"]) if u.get("vehicle_id") else None
-                car = f" → 🚚 {v['name']} ({v['plate_number']})" if v else " → (машину не обрано)"
-                lines.append(f"✅ {who} — {u['name']}{car}")
+                car = f" → 🚚 {_e(v['name'])} ({_e(v['plate_number'])})" if v else " → (машину не обрано)"
+                lines.append(f"✅ {who} — {_e(u['name'])}{car}")
             else:
                 lines.append(f"⏳ {who} — ще не заходив")
     else:
@@ -717,7 +755,7 @@ async def add_allow_do(msg: Message, state: FSMContext, bot: Bot):
         prefix = f"✅ Дозволено водія за ID <code>{raw}</code>.\n\n"
     elif raw.lstrip("@"):
         await db.add_allow(username=raw)
-        prefix = f"✅ Дозволено водія {('@'+raw.lstrip('@'))}.\n\n"
+        prefix = f"✅ Дозволено водія {_e('@'+raw.lstrip('@'))}.\n\n"
     else:
         prefix = "⚠️ Введіть числовий ID або @username.\n\n"
     text, kb = await _access_screen()
@@ -771,7 +809,7 @@ async def cb_news(cb: CallbackQuery):
     for it in items[:6]:
         flag = "🔴 " if it["is_alert"] else "• "
         date = f" ({it['date']})" if it.get("date") else ""
-        lines.append(f"{flag}<a href='{it['url']}'>{it['title']}</a>{date}")
+        lines.append(f"{flag}<a href='{it['url']}'>{_e(it['title'])}</a>{date}")
     lines.append("\n🔴 = аварія/доступність SENT-GEO")
     kb = InlineKeyboardMarkup(inline_keyboard=[[
         _btn("🔄 Оновити", "m:news"), _btn("⬅️ Меню", "m:main")]])
@@ -792,18 +830,18 @@ async def cb_check_do(cb: CallbackQuery):
         await cb.answer()
         return
     await cb.answer("Перевіряю…")
-    await _safe_edit(cb.message, f"⏳ Перевіряю рейс #{tid} — {trip['vehicle_name']}…", None)
+    await _safe_edit(cb.message, f"⏳ Перевіряю рейс #{tid} — {_e(trip['vehicle_name'])}…", None)
 
     trackers = await db.get_trackers_for_vehicle(trip["vehicle_id"])
     if not trackers:
-        await _safe_edit(cb.message, f"У авто {trip['vehicle_name']} немає трекерів.", _back_kb())
+        await _safe_edit(cb.message, f"У авто {_e(trip['vehicle_name'])} немає трекерів.", _back_kb())
         return
 
     results = await puesc.check_trip_trackers(trip, trackers)
     prov_by_id = {t["id"]: t["provider"] for t in trackers}
 
-    lines = [f"<b>Рейс #{tid} — {trip['vehicle_name']} ({trip['plate_number']})</b>",
-             f"RMPD: <code>{trip['rmpd_number']}</code>\n"]
+    lines = [f"<b>Рейс #{tid} — {_e(trip['vehicle_name'])} ({_e(trip['plate_number'])})</b>",
+             f"RMPD: <code>{_e(trip['rmpd_number'])}</code>\n"]
     best = None  # (lat, lon, label) to drop a map pin for
     eff_statuses = []
     for r in results:
@@ -819,7 +857,7 @@ async def cb_check_do(cb: CallbackQuery):
         icon = {"signal_ok": "✅", "signal_missing": "❌", "invalid_data": "❓",
                 "site_error": "🔴", "unknown_response": "❔"}.get(status, "❔")
         label = _STATUS_TEXT.get(status, status)
-        line = f"{icon} <b>{role}</b>: <code>{r.tracker_number}</code> — {label}\n   Остання позиція: {lp}"
+        line = f"{icon} <b>{_e(role)}</b>: <code>{_e(r.tracker_number)}</code> — {label}\n   Остання позиція: {lp}"
         if status == "signal_ok" and r.signal_age_min is not None:
             line += f" (оновлено ~{r.signal_age_min:.0f} хв тому)"
         if r.latitude is not None and r.longitude is not None:
@@ -831,7 +869,7 @@ async def cb_check_do(cb: CallbackQuery):
             st = "🚗 рух → ТРИВОГА" if (moving and alarm_now) else \
                  ("🚗 рух, очікування" if moving else "🅿️ стоянка (без тривоги)")
             line += f"\n   ⏱ без сигналу ~{silence_min:.0f} хв — {st}"
-        line += f"\n   {r.message}"
+        line += f"\n   {_e(r.message)}"
         lines.append(line)
 
     missing = sum(1 for s in eff_statuses if s == "signal_missing")

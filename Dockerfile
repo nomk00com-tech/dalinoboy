@@ -26,10 +26,15 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libcairo2 \
     fonts-liberation \
     wget \
+    tini \
     && rm -rf /var/lib/apt/lists/*
 
 RUN playwright install chromium
 
 COPY . .
 
+# Run under tini (PID 1) so it reaps zombie Chromium child processes. Without an
+# init, repeated headless-browser launches leave zombies that pile up over time
+# until the container hits its process/thread limit ("can't start new thread").
+ENTRYPOINT ["/usr/bin/tini", "--"]
 CMD ["python", "main.py"]

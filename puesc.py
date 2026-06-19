@@ -65,6 +65,13 @@ SIGNAL_FRESH_MINUTES = int(os.getenv("SIGNAL_FRESH_MINUTES", "20"))
 # Run the browser headless. checker.py --headed flips this to False for debugging.
 HEADLESS = os.getenv("PUESC_HEADLESS", "1") != "0"
 
+# Chromium flags for running in a small container (Railway/Docker):
+#   --no-sandbox            — required as root in a container
+#   --disable-dev-shm-usage — /dev/shm is tiny in containers; use /tmp instead
+#                             (prevents renderer crashes that leave zombies)
+#   --disable-gpu           — no GPU in headless server
+_CHROMIUM_ARGS = ["--no-sandbox", "--disable-dev-shm-usage", "--disable-gpu"]
+
 # Stable selectors verified against the live RMPD-406 form (2026-06).
 SEL_RMPD = "#_Sent_Rmpd406Portlet_rmpdNumber"
 SEL_PLATE = "#_Sent_Rmpd406Portlet_truckNumber"
@@ -286,7 +293,7 @@ async def _check_one_page(page, rmpd: str, plate: str, tracker_number: str, trac
 async def check_one(rmpd: str, plate: str, tracker_number: str, tracker_id: int = 0) -> CheckResult:
     """Check a single tracker. Opens a browser, checks, closes (no login)."""
     async with async_playwright() as pw:
-        browser = await pw.chromium.launch(headless=HEADLESS)
+        browser = await pw.chromium.launch(headless=HEADLESS, args=_CHROMIUM_ARGS)
         # Force the browser timezone to Warsaw: PUESC renders the GPS position
         # time ("Czas:") in the BROWSER's local timezone via JavaScript. On a UTC
         # server (Railway) that made fresh positions look ~2 h stale → false
@@ -313,7 +320,7 @@ async def check_trip_trackers(trip: dict, trackers: list[dict]) -> list[CheckRes
     results: list[CheckResult] = []
 
     async with async_playwright() as pw:
-        browser = await pw.chromium.launch(headless=HEADLESS)
+        browser = await pw.chromium.launch(headless=HEADLESS, args=_CHROMIUM_ARGS)
         # Force the browser timezone to Warsaw: PUESC renders the GPS position
         # time ("Czas:") in the BROWSER's local timezone via JavaScript. On a UTC
         # server (Railway) that made fresh positions look ~2 h stale → false
